@@ -69,7 +69,7 @@ const ORPHAN_RECOVERY_DEBOUNCE_MS = 1_000;
 let lastOrphanRecoveryScheduleAt = 0;
 const SUBAGENT_ANNOUNCE_TIMEOUT_MS = 120_000;
 const GATEWAY_ADMISSION_RETRY_DELAY_MS = 1_000;
-export const SUBAGENT_SUSPENDED_DELIVERY_HARD_CAP = 50;
+const SUBAGENT_SUSPENDED_DELIVERY_HARD_CAP = 50;
 
 /** Admission pressure for recoverable completion deliveries; rows are never pruned for capacity. */
 export function getSubagentDeliveryBacklogPressure(): {

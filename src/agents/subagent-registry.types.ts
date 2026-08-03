@@ -53,7 +53,7 @@ export type PendingFinalDeliveryPayload = {
   wakeOnDescendantSettle?: boolean;
 };
 
-export type SubagentDeliveryDisposition =
+type SubagentDeliveryDisposition =
   | "delivered"
   | "session_queued"
   | "intentional_non_delivery"
