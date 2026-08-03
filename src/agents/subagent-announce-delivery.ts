@@ -80,6 +80,7 @@ import {
   resolveGeneratedMediaSessionDeliveryRoute,
   type DeliveryContext,
 } from "./subagent-announce-origin.js";
+import { admitCorrelatedSubagentSessionDelivery } from "./subagent-completion-delivery.js";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
 import { resolveRequesterStoreKey } from "./subagent-requester-store-key.js";
 
@@ -1057,7 +1058,7 @@ async function sendSubagentAnnounceDirectly(params: {
         path: "direct",
         error: directDeliveryFailure,
         ...(directAnnounceResult && hasPayloadOutcomeSendEvidence(directAnnounceResult)
-          ? { terminal: true }
+          ? { disposition: "ambiguous" as const }
           : {}),
       };
     }
@@ -1163,12 +1164,17 @@ async function sendSubagentAnnounceDirectly(params: {
       path: "direct",
     };
   } catch (err) {
-    const terminal = isPermanentAnnounceDeliveryError(err) && hasAnnounceSendEvidence(err);
+    const permanent = isPermanentAnnounceDeliveryError(err);
+    const disposition = permanent
+      ? hasAnnounceSendEvidence(err)
+        ? "ambiguous"
+        : "permanent_failure"
+      : "retryable";
     return {
       delivered: false,
       path: "direct",
       error: summarizeDeliveryError(err),
-      ...(terminal ? { terminal: true } : {}),
+      disposition,
     };
   }
 }
@@ -1185,6 +1191,7 @@ export async function deliverSubagentAnnouncement(params: {
   completionDirectOrigin?: DeliveryContext;
   directOrigin?: DeliveryContext;
   sourceSessionKey?: string;
+  sourceRunId?: string;
   sourceChannel?: string;
   sourceTool?: string;
   targetRequesterSessionKey: string;
@@ -1202,7 +1209,6 @@ export async function deliverSubagentAnnouncement(params: {
     hasGeneratedMediaCompletionEvent(params.internalEvents);
   let durableQueueId: string | undefined;
   let durableQueueClaimed = false;
-  let durableQueueStatusUnknown = false;
   if (durableGeneratedMediaHandoff) {
     try {
       const cfg = subagentAnnounceDeliveryDeps.getRuntimeConfig();
@@ -1237,42 +1243,43 @@ export async function deliverSubagentAnnouncement(params: {
               })
             ? "message_tool_only"
             : "automatic";
-      const queued = await enqueueClaimedSessionDelivery(
-        {
-          kind: "agentTurn",
-          sessionKey: canonicalSessionKey,
-          message:
-            formatAgentInternalEventsForPrompt(params.internalEvents) || params.triggerMessage,
-          messageId: `${params.directIdempotencyKey}:agent-loop`,
-          route: queuedRoute.route,
-          ...(queuedRoute.deliveryContext ? { deliveryContext: queuedRoute.deliveryContext } : {}),
-          inputProvenance: {
-            kind: "inter_session",
-            ...(params.sourceSessionKey ? { sourceSessionKey: params.sourceSessionKey } : {}),
-            sourceChannel: params.sourceChannel ?? INTERNAL_MESSAGE_CHANNEL,
-            sourceTool: params.sourceTool ?? "subagent_announce",
-          },
-          sourceReplyDeliveryMode,
-          expectedMediaUrls: collectExpectedMediaFromInternalEvents(params.internalEvents),
-          idempotencyKey: `${params.directIdempotencyKey}:agent-loop`,
+      const queuePayload = {
+        kind: "agentTurn",
+        sessionKey: canonicalSessionKey,
+        message: formatAgentInternalEventsForPrompt(params.internalEvents) || params.triggerMessage,
+        messageId: `${params.directIdempotencyKey}:agent-loop`,
+        route: queuedRoute.route,
+        ...(queuedRoute.deliveryContext ? { deliveryContext: queuedRoute.deliveryContext } : {}),
+        inputProvenance: {
+          kind: "inter_session",
+          ...(params.sourceSessionKey ? { sourceSessionKey: params.sourceSessionKey } : {}),
+          sourceChannel: params.sourceChannel ?? INTERNAL_MESSAGE_CHANNEL,
+          sourceTool: params.sourceTool ?? "subagent_announce",
         },
-        resolveSubagentAnnounceTimeoutMs(cfg) + 5_000,
-      );
+        sourceReplyDeliveryMode,
+        expectedMediaUrls: collectExpectedMediaFromInternalEvents(params.internalEvents),
+        idempotencyKey: `${params.directIdempotencyKey}:agent-loop`,
+      } as const;
+      const queued = params.sourceRunId
+        ? admitCorrelatedSubagentSessionDelivery({
+            runId: params.sourceRunId,
+            payload: queuePayload,
+          })
+        : await enqueueClaimedSessionDelivery(queuePayload, resolveSubagentAnnounceTimeoutMs(cfg));
       if (queued.status === "failed") {
         return {
           delivered: false,
           path: "queued",
           reason: "completion_handoff_unavailable",
           error: "generated media session handoff was already dead-lettered",
-          terminal: true,
+          disposition: "permanent_failure",
         };
       }
       if (queued.status === "completed") {
-        return { delivered: true, path: "queued" };
+        return { delivered: true, path: "queued", disposition: "delivered" };
       }
       durableQueueId = queued.id;
       durableQueueClaimed = queued.claimed;
-      durableQueueStatusUnknown = queued.status === "unknown";
     } catch (error) {
       defaultRuntime.log(
         `[warn] Generated media session handoff could not be persisted; refusing ambiguous fallback: ${summarizeDeliveryError(error)}`,
@@ -1282,7 +1289,7 @@ export async function deliverSubagentAnnouncement(params: {
         path: "queued",
         reason: "completion_handoff_unavailable",
         error: "generated media session handoff could not be persisted",
-        terminal: true,
+        disposition: "retryable",
       };
     }
   }
@@ -1300,14 +1307,7 @@ export async function deliverSubagentAnnouncement(params: {
         `[warn] Generated media session handoff retry scheduling failed; durable recovery remains pending: ${summarizeDeliveryError(error)}`,
       );
     });
-    return durableQueueStatusUnknown
-      ? {
-          delivered: false,
-          path: "queued",
-          reason: "completion_handoff_pending",
-          error: "generated media session handoff state could not be verified",
-        }
-      : { delivered: true, path: "queued" };
+    return { delivered: false, path: "queued", disposition: "session_queued" };
   }
 
   return await runSubagentAnnounceDispatch({

@@ -8,11 +8,7 @@ import {
   runWithGatewayIndependentRootWorkAdmission,
 } from "../process/gateway-work-admission.js";
 import { prependAgentSteeringPrompt } from "./agent-steering-queue.js";
-import {
-  getDeliveryAttemptCount,
-  getDeliveryLastAttemptAt,
-  isDeliverySuspended,
-} from "./subagent-delivery-state.js";
+import { isDeliverySuspended } from "./subagent-delivery-state.js";
 import { createSubagentRegistryCompletionRuntime } from "./subagent-registry-completion-runtime.js";
 import { emitSubagentProgressEndedHook } from "./subagent-registry-completion.js";
 import { createSubagentRegistryContextCleanup } from "./subagent-registry-context-cleanup.js";
@@ -22,12 +18,7 @@ import {
   subagentRegistryDeps,
   type SubagentRegistryDeps,
 } from "./subagent-registry-deps.js";
-import {
-  ANNOUNCE_EXPIRY_MS,
-  MAX_ANNOUNCE_RETRY_COUNT,
-  reconcileOrphanedRun,
-  resolveAnnounceRetryDelayMs,
-} from "./subagent-registry-helpers.js";
+import { ANNOUNCE_EXPIRY_MS, reconcileOrphanedRun } from "./subagent-registry-helpers.js";
 import { createSubagentRegistryLifecycleController } from "./subagent-registry-lifecycle.js";
 import { createSubagentRegistryListener } from "./subagent-registry-listener.js";
 import {
@@ -78,6 +69,21 @@ const ORPHAN_RECOVERY_DEBOUNCE_MS = 1_000;
 let lastOrphanRecoveryScheduleAt = 0;
 const SUBAGENT_ANNOUNCE_TIMEOUT_MS = 120_000;
 const GATEWAY_ADMISSION_RETRY_DELAY_MS = 1_000;
+export const SUBAGENT_SUSPENDED_DELIVERY_HARD_CAP = 50;
+
+/** Admission pressure for recoverable completion deliveries; rows are never pruned for capacity. */
+export function getSubagentDeliveryBacklogPressure(): {
+  suspended: number;
+  blocked: boolean;
+} {
+  let suspended = 0;
+  for (const entry of subagentRuns.values()) {
+    if (isDeliverySuspended(entry)) {
+      suspended += 1;
+    }
+  }
+  return { suspended, blocked: suspended >= SUBAGENT_SUSPENDED_DELIVERY_HARD_CAP };
+}
 
 // Hot lifecycle callers name every changed or removed row. Zero ids is reserved
 // for explicit full-registry replacement at restore/reset boundaries.
@@ -229,7 +235,7 @@ function scheduleSubagentDeliveryResumeRetry(
 function finalizeResumedAnnounceGiveUpInBackground(
   runId: string,
   entry: SubagentRunRecord,
-  reason: "retry-limit" | "expiry",
+  reason: "expiry" | "permanent_failure",
 ) {
   void runWithGatewayIndependentRootWorkAdmission(async () => {
     await finalizeResumedAnnounceGiveUp({ runId, entry, reason });
@@ -246,7 +252,7 @@ function finalizeResumedAnnounceGiveUpInBackground(
   });
 }
 
-function resumeSubagentRun(runId: string) {
+export function resumeSubagentRun(runId: string) {
   if (!runId || resumedRuns.has(runId)) {
     return;
   }
@@ -284,11 +290,7 @@ function resumeSubagentRun(runId: string) {
   if (entry.pauseReason === "sessions_yield" && entry.wakeOnDescendantSettle !== true) {
     return;
   }
-  // Skip entries that have exhausted their retry budget or expired (#18264).
-  if (getDeliveryAttemptCount(entry) >= MAX_ANNOUNCE_RETRY_COUNT) {
-    finalizeResumedAnnounceGiveUpInBackground(runId, entry, "retry-limit");
-    return;
-  }
+  // Required completions are deadline-driven; retry count is diagnostic only.
   if (
     entry.expectsCompletionMessage !== true &&
     typeof entry.execution.endedAt === "number" &&
@@ -299,10 +301,8 @@ function resumeSubagentRun(runId: string) {
   }
 
   const now = Date.now();
-  const lastAttemptAt = getDeliveryLastAttemptAt(entry);
-  const delayMs = resolveAnnounceRetryDelayMs(getDeliveryAttemptCount(entry));
-  const earliestRetryAt = (lastAttemptAt ?? 0) + delayMs;
-  if (entry.expectsCompletionMessage === true && lastAttemptAt && now < earliestRetryAt) {
+  const earliestRetryAt = entry.delivery?.nextAttemptAt ?? 0;
+  if (entry.expectsCompletionMessage === true && now < earliestRetryAt) {
     const waitMs = Math.max(1, earliestRetryAt - now);
     scheduleSubagentDeliveryResumeRetry(runId, entry, waitMs);
     resumedRuns.add(runId);

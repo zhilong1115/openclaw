@@ -106,13 +106,12 @@ vi.mock("./subagent-announce.js", () => ({
 
 vi.mock("./subagent-registry-cleanup.js", () => ({
   resolveCleanupCompletionReason: () => SUBAGENT_ENDED_REASON_COMPLETE,
-  resolveDeferredCleanupDecision: () => ({ kind: "give-up", reason: "retry-limit" }),
+  resolveDeferredCleanupDecision: () => ({ kind: "give-up", reason: "expiry" }),
 }));
 
 vi.mock("./subagent-registry-helpers.js", () => ({
   ANNOUNCE_COMPLETION_HARD_EXPIRY_MS: 30 * 60_000,
   ANNOUNCE_EXPIRY_MS: 5 * 60_000,
-  MAX_ANNOUNCE_RETRY_COUNT: 3,
   MIN_ANNOUNCE_RETRY_DELAY_MS: 1_000,
   PROVISIONAL_KILL_RECONCILIATION_MS: 5 * 60_000,
   backfillCollectorArchiveAtMs: () => false,
@@ -2152,7 +2151,7 @@ describe("subagent registry lifecycle hardening", () => {
       controller.finalizeResumedAnnounceGiveUp({
         runId: entry.runId,
         entry,
-        reason: "retry-limit",
+        reason: "expiry",
       }),
     ).resolves.toBeUndefined();
 
@@ -2899,14 +2898,14 @@ describe("subagent registry lifecycle hardening", () => {
     await controller.finalizeResumedAnnounceGiveUp({
       runId: entry.runId,
       entry,
-      reason: "retry-limit",
+      reason: "expiry",
     });
 
     expect(entry.cleanupCompletedAt).toBeTypeOf("number");
     expect(Number.isNaN(entry.cleanupCompletedAt)).toBe(false);
   });
 
-  it("suspends successful keep-mode final delivery instead of completing cleanup on retry exhaustion", async () => {
+  it("suspends successful keep-mode final delivery after its deadline", async () => {
     const persistOrThrow = vi.fn();
     const entry = createRunEntry({
       endedAt: 4_000,
@@ -2927,7 +2926,7 @@ describe("subagent registry lifecycle hardening", () => {
     await controller.finalizeResumedAnnounceGiveUp({
       runId: entry.runId,
       entry,
-      reason: "retry-limit",
+      reason: "expiry",
     });
 
     expect(entry.delivery?.status).toBe("suspended");
@@ -2935,10 +2934,10 @@ describe("subagent registry lifecycle hardening", () => {
       requesterSessionKey: entry.requesterSessionKey,
       childSessionKey: entry.childSessionKey,
       childRunId: entry.runId,
-      frozenResultText: "final answer",
     });
+    expect(entry.completion?.resultText).toBe("final answer");
     expect(entry.delivery?.suspendedAt).toBeTypeOf("number");
-    expect(entry.delivery?.suspendedReason).toBe("retry-limit");
+    expect(entry.delivery?.suspendedReason).toBe("expiry");
     expect(entry.cleanupHandled).toBe(false);
     expect(entry.cleanupCompletedAt).toBeUndefined();
     expect(helperMocks.safeRemoveAttachmentsDir).not.toHaveBeenCalled();
@@ -3001,7 +3000,7 @@ describe("subagent registry lifecycle hardening", () => {
       await controller.finalizeResumedAnnounceGiveUp({
         runId: entry.runId,
         entry,
-        reason: "retry-limit",
+        reason: "expiry",
       });
 
       expect(entry.delivery?.payload).toBeUndefined();
@@ -3121,7 +3120,7 @@ describe("subagent registry lifecycle hardening", () => {
       childRunId: entry.runId,
     });
     expect(entry.delivery?.suspendedAt).toBeTypeOf("number");
-    expect(entry.delivery?.suspendedReason).toBe("retry-limit");
+    expect(entry.delivery?.suspendedReason).toBe("expiry");
     expect(entry.cleanupCompletedAt).toBeUndefined();
     expectFields(
       findCallArg(
@@ -3223,7 +3222,7 @@ describe("subagent registry lifecycle hardening", () => {
         runId: staleEntry.runId,
         requesterSessionKey: staleEntry.requesterSessionKey,
       }),
-      "retry-limit",
+      "expiry",
     );
 
     vi.clearAllMocks();
@@ -3839,7 +3838,7 @@ describe("requester settle wake trigger", () => {
     await controller.finalizeResumedAnnounceGiveUp({
       runId: entry.runId,
       entry,
-      reason: "retry-limit",
+      reason: "expiry",
     });
 
     expect(entry.delivery?.status).toBe("suspended");
@@ -3871,7 +3870,7 @@ describe("requester settle wake trigger", () => {
     await controller.finalizeResumedAnnounceGiveUp({
       runId: entry.runId,
       entry,
-      reason: "retry-limit",
+      reason: "expiry",
     });
 
     expect(entry.delivery?.status).toBe("failed");

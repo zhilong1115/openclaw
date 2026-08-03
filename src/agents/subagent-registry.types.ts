@@ -50,10 +50,16 @@ export type PendingFinalDeliveryPayload = {
   outcome?: SubagentRunOutcome;
   expectsCompletionMessage?: boolean;
   spawnMode?: SpawnSubagentMode;
-  frozenResultText?: string | null;
-  fallbackFrozenResultText?: string | null;
   wakeOnDescendantSettle?: boolean;
 };
+
+export type SubagentDeliveryDisposition =
+  | "delivered"
+  | "session_queued"
+  | "intentional_non_delivery"
+  | "retryable"
+  | "ambiguous"
+  | "permanent_failure";
 
 type SubagentExecutionState = {
   status: "queued" | "running" | "interrupted" | "terminal";
@@ -115,13 +121,22 @@ export type SubagentCompletionDeliveryState = {
   lastAttemptAt?: number;
   attemptCount?: number;
   lastError?: string | null;
+  /** Closed result of the latest transport attempt; never doubles as delivery success. */
+  disposition?: SubagentDeliveryDisposition;
+  /** Logical obligation generation. Redrive increments it and never revives an old row. */
+  generation?: number;
+  queueId?: string;
+  windowStartedAt?: number;
+  deadlineAt?: number;
+  nextAttemptAt?: number;
   steeringLeaseId?: string;
   steeringLeasedAt?: number;
   steeringInjectedAt?: number;
   suspendedAt?: number;
-  suspendedReason?: "retry-limit" | "expiry";
+  suspendedReason?: "expiry" | "permanent_failure";
+  dismissedAt?: number;
   discardedAt?: number;
-  discardReason?: "expired" | "pressure-pruned";
+  discardReason?: "expired";
   discardedPayloadSummary?: {
     requesterSessionKey?: string;
     childSessionKey?: string;

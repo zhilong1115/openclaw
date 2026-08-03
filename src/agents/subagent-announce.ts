@@ -598,6 +598,7 @@ export async function runSubagentAnnounceFlow(params: {
       completionDirectOrigin,
       directOrigin,
       sourceSessionKey: params.childSessionKey,
+      sourceRunId: params.childRunId,
       sourceChannel: INTERNAL_MESSAGE_CHANNEL,
       sourceTool: "subagent_announce",
       targetRequesterSessionKey,
@@ -609,7 +610,7 @@ export async function runSubagentAnnounceFlow(params: {
       signal: params.signal,
     });
     reportDeliveryResult(delivery);
-    didAnnounce = delivery.delivered || delivery.terminal === true;
+    didAnnounce = delivery.delivered || delivery.disposition === "intentional_non_delivery";
     if (!delivery.delivered && delivery.path === "direct" && delivery.error) {
       defaultRuntime.log(
         `[warn] Subagent completion direct announce failed for run ${params.childRunId}: ${delivery.error}`,
